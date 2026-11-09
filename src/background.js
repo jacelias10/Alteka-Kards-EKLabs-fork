@@ -13,7 +13,7 @@ var bonjour = require('bonjour')()
 const mime = require('mime-types')
 
 // Project specific includes
-const touchBar = require('./touchBar.js')
+const touchBar = require('./touchbar.js')
 const fs = require('fs')
 const say = require('say')
 // var sizeOf = require('image-size')
@@ -33,7 +33,7 @@ const store = new Store()
 var Rollbar = require("rollbar")
 let env = require('../env.json')
 if (!isDevelopment && env.rollbarToken != '') {
-  var rollbar = new Rollbar({
+  new Rollbar({
     accessToken: env.rollbarToken,
     captureUncaught: true,
     captureUnhandledRejections: true,
@@ -129,13 +129,23 @@ app.on('ready', function() {
     ...getDefaultConfig(),
     ...store.get('KardsConfig', getDefaultConfig())
   }
+  const savedOutputs = store.get('KardsOutputs', {})
+  for (const [id, saved] of Object.entries(savedOutputs)) {
+    outputConfigs.set(Number(id), { ...getDefaultConfig(), ...saved, visible: false,
+      audio: { ...saved.audio, enabled: false } })
+  }
   config.visible = false
   config.audio.enabled = false
+  config = outputConfigs.get(config.screen) || config
+  outputConfigs.set(config.screen, config)
   log.info('Loaded Config')
-  controlMenu.setup(config)
+  controlMenu.setup(JSON.parse(JSON.stringify(config)))
 })
 ipcMain.on('config', (_, arg) => {
+  // Late renderer updates may belong to the previously selected output.
+  if (arg.screen !== config.screen) return
   config = arg
+  outputConfigs.set(config.screen, config)
   manageTestCardWindow()
   if (testCardWindow != null) { 
     testCardWindow.webContents.send('config', config)
@@ -145,15 +155,20 @@ ipcMain.on('config', (_, arg) => {
       }
     }
   }
-  controlMenu.updateConfig(config)
-  osc.updateConfig(config)
-  rest.updateConfig(config)
+  controlMenu.updateConfig(JSON.parse(JSON.stringify(config)))
+  osc.updateConfig(JSON.parse(JSON.stringify(config)))
+  rest.updateConfig(JSON.parse(JSON.stringify(config)))
   store.set('KardsConfig', config)
+  store.set('KardsOutputs', Object.fromEntries(outputConfigs))
   touchBar.setConfig(config)
   updateScreens()
 })
-ipcMain.on('getConfigTestCard', () => {
-  testCardWindow.webContents.send('config', config)
+ipcMain.on('getConfigTestCard', (event) => {
+  const entry = outputForSender(event.sender)
+  const cfg = entry ? outputConfigs.get(entry[0]) : config
+  event.sender.send('config', cfg)
+  const display = screen.getAllDisplays().find(display => display.id === cfg.screen)
+  if (display) event.sender.send('displayFrequency', display.displayFrequency)
 })
 
 ipcMain.on('getConfigControl', () => {
@@ -173,12 +188,12 @@ ipcMain.on('aboutDialogInfo', () => {
 
 
 ipcMain.on('resetDefault', () => {
-  controlWindow.webContents.send('config', getDefaultConfig())
+  controlWindow.webContents.send('config', { ...getDefaultConfig(), screen: config.screen })
   resetAudio()
 })
 
 function getDefaultConfig() {
-  let defaultConfig = require('./defaultConfig.json')
+  let defaultConfig = JSON.parse(JSON.stringify(require('./defaultConfig.json')))
   defaultConfig.name = hostname().split('.')[0].replace(/([a-z\xE0-\xFF])([A-Z\xC0\xDF])/g, "$1 $2").replace(/-|_|\.|\||\+|=|~|<|>|\/|\\/g, ' ')
   defaultConfig.screen = screen.getPrimaryDisplay().id
   return defaultConfig
@@ -192,11 +207,44 @@ function getDefaultConfig() {
 //       WINDOW HANDLER     //
 //==========================//
 let controlWindow
+let shuttingDown = false
+app.on('before-quit', () => { shuttingDown = true })
 let testCardWindow
-let testCardWindowScreen
+const outputConfigs = new Map()
+const outputWindows = new Map()
+
+function getOutputWindow(id) {
+  const entry = outputWindows.get(id)
+  return entry ? entry.window : null
+}
+
+function outputForSender(sender) {
+  return [...outputWindows].find(([, entry]) => entry.window.webContents === sender)
+}
+
+ipcMain.on('selectOutput', (_, id) => selectOutput(id))
+
+function selectOutput(id) {
+  if (!screen.getAllDisplays().some(display => display.id === id)) return
+  if (!outputConfigs.has(id)) {
+    const fresh = getDefaultConfig()
+    fresh.screen = id
+    fresh.audio.enabled = false
+    outputConfigs.set(id, fresh)
+  }
+  config = outputConfigs.get(id)
+  testCardWindow = getOutputWindow(id)
+  controlMenu.updateConfig(JSON.parse(JSON.stringify(config)))
+  osc.updateConfig(JSON.parse(JSON.stringify(config)))
+  rest.updateConfig(JSON.parse(JSON.stringify(config)))
+  touchBar.setConfig(config)
+  controlWindow.webContents.send('config', config)
+  updateScreens()
+}
 var controlMenu = new altekaMenu()
 
 controlMenu.on('menuClick', (c) => {
+  if (c.screen !== config.screen) { selectOutput(c.screen); return }
   controlWindow.webContents.send('config', c)
 })
 controlMenu.on('loadAudioFile', () => {
@@ -231,6 +279,7 @@ async function createWindow() {
   })
 
   controlWindow.on('closed', () => {
+    shuttingDown = true
     log.info('Control Window closed - Quitting App')
     rest.stop()
     app.quit()
@@ -279,13 +328,27 @@ function updateScreens() {
     rest.updateScreens(screens)
     osc.updateScreens(screens)
   }
-  if (testCardWindow != null) {
-    for (const scr in screens) {
-      if (screens[scr].id == config.screen) {
-        testCardWindow.webContents.send('displayFrequency', screens[scr].displayFrequency)   
-      }
+  for (const [id, entry] of outputWindows) {
+    const display = screens.find(display => display.id === id)
+    if (display) {
+      entry.window.webContents.send('displayFrequency', display.displayFrequency)
+      if (!entry.windowed && !entry.exportOnly) entry.window.setBounds(display.bounds)
+    }
+    else {
+      outputWindows.delete(id)
+      entry.window.destroy()
+      outputConfigs.get(id).visible = false
     }
   }
+  if (config && !screens.some(display => display.id === config.screen)) {
+    config = outputConfigs.get(primaryScreen) || { ...getDefaultConfig(), screen: primaryScreen }
+    outputConfigs.set(primaryScreen, config)
+    controlWindow.webContents.send('config', config)
+  }
+  testCardWindow = getOutputWindow(config && config.screen)
+  if (config) store.set('KardsOutputs', Object.fromEntries(outputConfigs))
+  if (controlWindow && config) controlWindow.webContents.send('outputStates',
+    Object.fromEntries([...outputConfigs].map(([id, cfg]) => [id, cfg.visible])))
 }
 ipcMain.on('getScreens', () => {
   updateScreens()
@@ -314,8 +377,22 @@ app.on('ready', function() {
 //========================//
 //       IPC Handlers     //
 //========================//
-ipcMain.on('closeTestCard', (_, arg) => {
-  controlWindow.webContents.send('closeTestCard')
+ipcMain.on('closeTestCard', (event) => {
+  const entry = outputForSender(event.sender)
+  const id = entry ? entry[0] : config.screen
+  const cfg = outputConfigs.get(id)
+  if (!cfg) return
+  cfg.visible = false
+  const target = outputWindows.get(id)
+  if (target) {
+    outputWindows.delete(id)
+    target.window.destroy()
+  }
+  if (id === config.screen) {
+    testCardWindow = null
+    controlWindow.webContents.send('config', cfg)
+  }
+  updateScreens()
 })
 
 ipcMain.on('openLogs', () => {
@@ -355,9 +432,7 @@ ipcMain.on('networkInfo', (event) => {
           }
       }
   }
-  if (testCardWindow !== null) {
-    testCardWindow.webContents.send('networkInfo', results)
-  }
+  event.sender.send('networkInfo', results)
 })
 
 
@@ -369,184 +444,72 @@ ipcMain.on('networkInfo', (event) => {
 //==========================//
 // called when config is updated
 function manageTestCardWindow() {
-  if (testCardWindow == null && config.visible) { // Test card doesn't exist, but now needs to
-    setupNewTestCardWindow()
-  } else if (testCardWindow != null && !config.visible && !headlessExportMode) { // A window exists and shouldn't so lets close it
-    closeTestCard()
-  } else if (testCardWindow != null && config.visible && config.screen != testCardWindowScreen) { // a different screen as been selected..
-    moveTestCardToNewScreen()
-  } else if (testCardWindow != null) {
-    if (testCardWindow.isFullScreen() || testCardWindow.isSimpleFullScreen()) {
-      if (config.windowed) { // A full screen test card now needs to be windowed - hard to handle elegantly so close and reopen
-        reopenTestCard()
-      }
-    } else if (!testCardWindow.isFullScreen() && !testCardWindow.isSimpleFullScreen()) {
-      if (!config.windowed) { // A windowed test card now needs to be full screen. 
-        reopenTestCard()
-      }
-    }
+  const id = config.screen
+  let entry = outputWindows.get(id)
+  if (entry && entry.exportOnly) return
+  if (entry && (!config.visible || entry.windowed !== config.windowed)) {
+    outputWindows.delete(id)
+    entry.window.destroy()
+    entry = null
   }
-  if (testCardWindow !== null && config.visible) {
-    if (config.cardType == 'led' && config.windowed) {
-      testCardWindow.resizable = false
-    } else {
-      testCardWindow.resizable = true
-    }
-  }
+  if (!entry && config.visible) setupNewTestCardWindow()
+  testCardWindow = getOutputWindow(id)
+  if (testCardWindow) testCardWindow.setResizable(config.windowed && config.cardType !== 'led')
 }
 
 function setupNewTestCardWindow() {
-  let windowConfig = {title: "Kards - Output", show: false, frame: false, width: config.window.width, height: config.window.height, webPreferences: {preload: path.join(__dirname, 'preload.js')}}  
-  
-  if (!config.windowed) { // Setting up for full screen test card
-    windowConfig.fullscreen = true
-
-    for (const disp of screen.getAllDisplays()) {
-      if (disp.id == config.screen) {
-          if (process.platform == 'darwin') {
-
-            // figure out if it's newer macos...
-            let version = process.getSystemVersion().split('.')
-            let catalina = false
-            if (version[0] > 10) {
-              catalina = true
-            }
-            if (version[0] == 10 && version[1] >= 15) {
-              catalina = true
-            }
-
-            if (disp.bounds.height != disp.workArea.height && catalina) {
-              log.info('Running in seperate spaces mode - this is Catalina or newer')
-              windowConfig.simpleFullscreen = false 
-            } else if (!catalina) {
-              log.info('Using legacy full screen mode as this is not Catalina (or newer)')
-              windowConfig.simpleFullscreen = true 
-            } else {
-              log.info('Using legacy full screen mode')
-              windowConfig.simpleFullscreen = true 
-            }
-          } else {
-            log.info('Using windows full screen system. Easy.')
-          }
-        windowConfig.x = disp.bounds.x
-        windowConfig.y = disp.bounds.y
-        windowConfig.width = disp.bounds.width
-        windowConfig.height = disp.bounds.height
-      }
-    }
-  } else {
-    windowConfig.roundedCorners = false
-    for (const disp of screen.getAllDisplays()) {
-      if (disp.id == config.screen) {
-        windowConfig.x = disp.bounds.x + (disp.bounds.width - config.window.width)/2
-        windowConfig.y = disp.bounds.y + (disp.bounds.height - config.window.height)/2
-      }
-    }
-  }
-  showTestCardWindow(windowConfig)
+  const display = screen.getAllDisplays().find(display => display.id === config.screen)
+  if (!display) return
+  const bounds = config.windowed ? {
+    x: Math.round(display.bounds.x + (display.bounds.width - config.window.width) / 2),
+    y: Math.round(display.bounds.y + (display.bounds.height - config.window.height) / 2),
+    width: config.window.width, height: config.window.height
+  } : display.bounds
+  showTestCardWindow({ title: 'Kards - Output', show: false, frame: false,
+    ...bounds, fullscreen: !config.windowed,
+    simpleFullscreen: process.platform === 'darwin' && !config.windowed,
+    roundedCorners: false,
+    webPreferences: { preload: path.join(__dirname, 'preload.js') } })
 }
-
-function closeTestCard() {
-  log.info('Closing test card')
-  testCardWindow.destroy()
-  testCardWindow = null
-  testCardWindowScreen = null
-  clearTimeout(testCardWindowResizeTimer)
-}
-
-function reopenTestCard() {
-  closeTestCard()
-  config.visible = true
-  log.info('Setting timer to re-open test card')
-  setTimeout(manageTestCardWindow, 500) 
-}
-
-function moveTestCardToNewScreen() {
-  if (config.windowed) {
-    for (const disp of screen.getAllDisplays()) {
-      if (disp.id == config.screen) {
-          testCardWindowScreen = disp.id
-      }
-    }
-  } else {
-    reopenTestCard()
-  }  
-}
-
-ipcMain.on('moveWindowTo', (_, arg) => {
-  log.info('Move active window to screen: ', arg)
-  for (const disp of screen.getAllDisplays()) {
-    if (disp.id == arg) {
-        testCardWindowScreen = disp.id
-        let x = disp.bounds.x + (disp.bounds.width - config.window.width)/2
-        let y = disp.bounds.y + (disp.bounds.height - config.window.height)/2
-        testCardWindow.setPosition(Math.round(x), Math.round(y))
-    }
-  }
-})
 
 function showTestCardWindow(windowConfig) {
-  log.info('Showing test card with config: ', windowConfig)  
-
-  testCardWindow = new BrowserWindow(windowConfig)
-  testCardWindowScreen = config.screen
-
-  testCardWindow.on('close', function () { 
-    testCardWindow = null 
-  })
-
-  if(config.windowed || headlessExportMode){
-    testCardWindow.setBounds({ width: windowConfig.width, height: windowConfig.height })
-  }
-
-  if (process.env.WEBPACK_DEV_SERVER_URL) {
-    testCardWindow.loadURL(process.env.WEBPACK_DEV_SERVER_URL + '#/testcard')
-    if (isDevelopment) testCardWindow.webContents.openDevTools()
-  } else {
-    createProtocol('app')
-    testCardWindow.loadURL('app://./index.html#testcard')
-  }
-
-  testCardWindow.once('ready-to-show', () => {
-    if (config.visible && !headlessExportMode && testCardWindow) {
-      testCardWindow.show()
+  const id = config.screen
+  const win = new BrowserWindow(windowConfig)
+  const entry = { window: win, windowed: config.windowed, resizeTimer: null, exportOnly: headlessExportMode }
+  headlessExportMode = false
+  outputWindows.set(id, entry)
+  testCardWindow = win
+  win.on('closed', () => {
+    clearTimeout(entry.resizeTimer)
+    if (shuttingDown) return
+    if (outputWindows.get(id) !== entry) return
+    outputWindows.delete(id)
+    const cfg = outputConfigs.get(id)
+    cfg.visible = false
+    if (config.screen === id) {
+      testCardWindow = null
+      controlWindow.webContents.send('config', cfg)
     }
+    updateScreens()
   })
-
-  testCardWindow.on('resize', function() {
-    clearTimeout(testCardWindowResizeTimer)
-    testCardWindowResizeTimer = setTimeout(handleTestCardResize, 500)
+  win.once('ready-to-show', () => {
+    if (outputConfigs.get(id) && outputConfigs.get(id).visible && !entry.exportOnly && !win.isDestroyed()) win.showInactive()
   })
-
-  testCardWindow.on('move', function() {
-    let x = testCardWindow.getBounds().x
-    let y = testCardWindow.getBounds().y
-
-    for (const disp of screen.getAllDisplays()) {
-      if (x > disp.bounds.x && x < (disp.bounds.x + disp.bounds.width) && y > disp.bounds.y && y < (disp.bounds.y + disp.bounds.height)) {
-        if (testCardWindowScreen!=disp.id) {
-          config.screen = disp.id
-          controlWindow.webContents.send('config', config)
-        }
-      }
-    }
+  win.on('resize', () => {
+    clearTimeout(entry.resizeTimer)
+    entry.resizeTimer = setTimeout(() => {
+      const cfg = outputConfigs.get(id)
+      if (!cfg.windowed || win.isDestroyed()) return
+      const [width, height] = win.getContentSize()
+      if (cfg.window.width === width && cfg.window.height === height) return
+      cfg.window = { width, height }
+      if (config.screen === id) controlWindow.webContents.send('config', cfg)
+      win.webContents.send('config', cfg)
+    }, 500)
   })
+  if (process.env.WEBPACK_DEV_SERVER_URL) win.loadURL(process.env.WEBPACK_DEV_SERVER_URL + '#/testcard')
+  else win.loadURL('app://./index.html#testcard')
 }
-
-function handleTestCardResize() {
-  if (testCardWindow != null) {
-    let bounds = testCardWindow.getBounds()
-    let t = 2
-    if (config.window.width < (bounds.width-t) || config.window.width > (bounds.width+t) || config.window.height < (bounds.height-t) || config.window.height > (bounds.height+t) || process.platform == 'darwin') {
-      config.window.width = bounds.width
-      config.window.height = bounds.height
-      controlWindow.webContents.send('config', config)
-    }
-  }
-}
-let testCardWindowResizeTimer
-
-
 
 
 //========================//
@@ -557,6 +520,7 @@ app.on('ready', function() {
   osc.setup()
 })
 osc.on('updateConfig', (c) => {
+  if (c.screen !== config.screen) { selectOutput(c.screen); return }
   controlWindow.webContents.send('config', c)
 })
 osc.on('audioFile', (filePath) => {
@@ -576,6 +540,7 @@ app.on('ready', function() {
   rest.setup()
 })
 rest.on('updateConfig', (c) => {
+  if (c.screen !== config.screen) { selectOutput(c.screen); return }
   controlWindow.webContents.send('config', c)
 })
 
@@ -584,7 +549,22 @@ rest.on('updateConfig', (c) => {
 //========================//
 let headlessExportMode = false
 
-ipcMain.on('testCardKeyPress', (_, msg) => {
+ipcMain.on('testCardKeyPress', (event, msg) => {
+  if (!['windowed', 'animated', 'showInfo', 'showClock', 'raster'].includes(msg)) return
+  const entry = outputForSender(event.sender)
+  if (entry && entry[0] !== config.screen) {
+    const cfg = outputConfigs.get(entry[0])
+    cfg[msg] = !cfg[msg]
+    // Reconcile using the output's own settings, then restore the editor selection.
+    const selected = config
+    config = cfg
+    manageTestCardWindow()
+    if (getOutputWindow(entry[0])) getOutputWindow(entry[0]).webContents.send('config', cfg)
+    config = selected
+    testCardWindow = getOutputWindow(config.screen)
+    updateScreens()
+    return
+  }
   config[msg] = !config[msg]
   controlWindow.webContents.send('config', config)
   if (testCardWindow != null) {
@@ -628,12 +608,14 @@ ipcMain.on('selectImage', () => {
   }
 })
 
-ipcMain.on('saveAsPNG', (_, arg) => {
+ipcMain.on('saveAsPNG', (event, arg) => {
+  const source = outputForSender(event.sender)
+  const exportConfig = source ? outputConfigs.get(source[0]) : config
   headlessExportMode = false
-  let suffix = config.cardType[0].toUpperCase() + config.cardType.slice(1)
+  let suffix = exportConfig.cardType[0].toUpperCase() + exportConfig.cardType.slice(1)
   if (suffix == 'Placeholder') suffix = 'Name'
   if (suffix == 'Led') suffix = 'LED'
-  var name = config.name.replace(/ /g,"-") + '-' + suffix + 'Kard.png'
+  var name = exportConfig.name.replace(/ /g,"-") + '-' + suffix + 'Kard.png'
   dialog.showSaveDialog(controlWindow, {title: 'Save PNG', defaultPath: name, filters: [{name: 'Images', extensions: ['png']}]}).then(result => {
     if (!result.canceled) {
       var base64Data = arg.replace(/^data:image\/png;base64,/, "")
@@ -652,13 +634,11 @@ ipcMain.on('saveAsPNG', (_, arg) => {
       controlWindow.webContents.send('exportCardCompleted', 'File Save Cancelled')
     }
   })
-  if (!config.visible && testCardWindow !== null) {
-    log.info('Closing dummy test card window')
-    testCardWindow.close()
-  }
+  if (source && source[1].exportOnly) source[1].window.close()
 })
 
-ipcMain.on('setAsWallpaper', (_, arg) => {
+ipcMain.on('setAsWallpaper', (event, arg) => {
+  const source = outputForSender(event.sender)
   headlessExportMode = false
   let dest = app.getPath('userData') + '/wallpaper' + Math.round((Math.random()*100000)) + '.png'
   var base64Data = arg.replace(/^data:image\/png;base64,/, "")
@@ -674,10 +654,7 @@ ipcMain.on('setAsWallpaper', (_, arg) => {
       controlWindow.webContents.send('exportCardCompleted')
       })();
     })
-    if (!config.visible) {
-      log.info('Closing dummy test card window')
-      testCardWindow.close()
-    }
+    if (source && source[1].exportOnly) source[1].window.close()
   })
 
 
@@ -703,7 +680,6 @@ function resetAudio() {
   setTimeout(createTextAudio, 5000)
 }
 
-let lastCreatedVoice = ''
 function createVoice() {
   let dest = app.getPath('userData') + '/voice.wav'  
   let voice = config.audio.prependText + config.name 
@@ -727,19 +703,6 @@ function createTextAudio() {
     log.info('Audio :: Updated audio text (' + config.audio.text + ') has been saved to ', dest)
     config.audio.textData = 'data:audio/wav;base64,' + fs.readFileSync(dest, {encoding: 'base64'})
     controlWindow.webContents.send('config', config)
-  })
-}
-
-let textToSpeechCount = 0
-function textToSpeachData(text) {
-  let dest = app.getPath('userData') + '/tts0' + textToSpeechCount + '.wav'  
-  textToSpeechCount++
-  say.export(config.audio.text, null, null, dest, (err) => {
-    if (err) {
-      log.error(err)
-      return ''
-    }
-    return 'data:audio/wav;base64,' + fs.readFileSync(dest, {encoding: 'base64'})
   })
 }
 
@@ -812,7 +775,7 @@ function importSettings() {
       if (d.createdBy == 'Kards') {
         if (d.exportedVersion == version) {
           for (let key in config) {
-            if (d[key] != undefined && key != 'visible' && key != 'exportedVersion' && key != 'createdBy' && typeof d[key] === typeof config[key]) {
+            if (d[key] != undefined && key != 'screen' && key != 'visible' && key != 'exportedVersion' && key != 'createdBy' && typeof d[key] === typeof config[key]) {
               config[key] = d[key]
               count++
             }

@@ -18,6 +18,23 @@ A note to say that whilst the app generates specific levels, which match standar
 
 The app is based around Electron to create and manage the windows. The content is heavily Vue.js driven, with some custom components to create the test cards.
 
+#### Independent monitor outputs (EKLabs fork)
+
+Click a monitor in the display map to edit that monitor's output. Choose its card,
+name, sizing, audio, and other options, then enable its output using the existing
+Enable switch. Select another monitor and repeat: enabled outputs keep running
+while you edit another monitor. Green highlights identify the monitor being edited;
+check marks identify enabled outputs.
+
+Each monitor keeps its own settings across launches. Outputs and audio start off
+when the application launches. Escape in an output closes only that output.
+Unplugging a display closes its output and keeps the remaining outputs running.
+Settings import/export and PNG export apply to the selected monitor. OSC/REST
+controls continue to edit the selected output.
+
+Run `npm run test:outputs` (Node 18 or newer) for the automated window lifecycle checks.
+Physical multi-monitor validation is still required on macOS and Windows.
+
 #### Build Setup
 ``` bash
 # Clone the repo into a folder

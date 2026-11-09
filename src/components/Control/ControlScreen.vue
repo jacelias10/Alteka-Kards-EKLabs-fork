@@ -1,7 +1,11 @@
 <template>
-  <div> 
+  <div>
+    <p style="text-align: center; margin: 8px; color: #888; font-size: 12px;">Select a monitor to edit its independent output. Other outputs keep running.</p>
     <svg :view-box.camel="viewBox" style="width: 90%; margin-left: 5%; margin-top: 10px; height: 125px;">
-      <g v-for="scr in screens" :key="scr.id" v-on:click="selectScreen(scr.id)">
+      <g v-for="(scr, index) in screens" :key="scr.id" role="button" tabindex="0"
+        :aria-label="'Edit monitor ' + (index + 1) + ', ' + scr.description + (outputStates[scr.id] ? ', output enabled' : ', output disabled')"
+        :aria-pressed="config.screen == scr.id" style="cursor: pointer;"
+        @click="selectScreen(scr.id)" @keydown.enter="selectScreen(scr.id)" @keydown.space.prevent="selectScreen(scr.id)">
         <rect :x="scr.bounds.x" :y="scr.bounds.y" :width="scr.bounds.width" :height="scr.bounds.height" fill="#555" style="stroke-width:25;stroke:#3d3d3d;" />
         <rect :x="scr.bounds.x" :y="scr.bounds.y" :width="scr.bounds.width" :height="scr.bounds.height" fill="#6ab42f" style="stroke-width:25;stroke:#3d3d3d;" v-if="config.screen == scr.id" />
         
@@ -12,8 +16,8 @@
         <text v-if="scr.portrait" :x="scr.bounds.x + scr.bounds.width/2" :y="scr.bounds.y + scr.bounds.height/1.1" :width="scr.bounds.width" :height="scr.bounds.height" font-family="Verdana" :font-size="scr.bounds.width/4" text-anchor="middle" fill="white">{{ scr.bounds.height }}</text>
 
         <text :x="scr.bounds.x + scr.bounds.width/2" :y="scr.bounds.y + scr.bounds.height*0.4 - (scr.bounds.height*0.05 * scr.portrait)" :width="scr.bounds.width" :height="scr.bounds.height" text-anchor="middle" fill="white" :font-size="scr.bounds.height/3" class="fa">{{ scr.icon }}</text>
-        <text :x="scr.bounds.x + scr.bounds.width/2" :y="scr.bounds.y + scr.bounds.height*0.32 - (scr.bounds.height*0.05 * scr.portrait)" :width="scr.bounds.width" :height="scr.bounds.height" text-anchor="middle" fill="white" :font-size="scr.bounds.height/6" class="fa" v-if="config.screen == scr.id && config.visible && scr.primary">{{ "\uf00c" }}</text>
-        <text :x="scr.bounds.x + scr.bounds.width/2" :y="scr.bounds.y + scr.bounds.height*0.28 - (scr.bounds.height*0.05 * scr.portrait)" :width="scr.bounds.width" :height="scr.bounds.height" text-anchor="middle" fill="white" :font-size="scr.bounds.height/6" class="fa" v-if="config.screen == scr.id && config.visible && !scr.primary">{{ "\uf00c" }}</text>
+        <text :x="scr.bounds.x + scr.bounds.width/2" :y="scr.bounds.y + scr.bounds.height*0.32 - (scr.bounds.height*0.05 * scr.portrait)" :width="scr.bounds.width" :height="scr.bounds.height" text-anchor="middle" fill="white" :font-size="scr.bounds.height/6" class="fa" v-if="outputStates[scr.id] && scr.primary">{{ "\uf00c" }}</text>
+        <text :x="scr.bounds.x + scr.bounds.width/2" :y="scr.bounds.y + scr.bounds.height*0.28 - (scr.bounds.height*0.05 * scr.portrait)" :width="scr.bounds.width" :height="scr.bounds.height" text-anchor="middle" fill="white" :font-size="scr.bounds.height/6" class="fa" v-if="outputStates[scr.id] && !scr.primary">{{ "\uf00c" }}</text>
       </g>
     </svg>
   </div>
@@ -37,6 +41,7 @@
     data: function() {
       return {
         screens: [],
+        outputStates: {},
         primaryScreen: null,
         check: "\uf00c",
         viewBox: '0 0 0 0'
@@ -88,10 +93,7 @@
         this.setOutputToMatchScreen()
       },
       selectScreen: function(id) { 
-        if (this.config.windowed && this.config.visible && this.config.screen != id) {
-          window.ipcRenderer.send('moveWindowTo', id)
-        }
-        this.config.screen = id
+        window.ipcRenderer.send('selectOutput', id)
       },
       setOutputToMatchScreen: function() {
         if (!this.config.windowed && this.config.fullsize) {
@@ -112,12 +114,13 @@
         }
         if (!exists) {
           console.log('Update screen as selected screen doesnt exist...', this.primaryScreen)
-          this.config.screen = this.primaryScreen
+          window.ipcRenderer.send('selectOutput', this.primaryScreen)
         }
       }
     },
     mounted: function() {
       let vm = this
+      window.ipcRenderer.receive('outputStates', function(states) { vm.outputStates = states })
       window.ipcRenderer.receive('screens', function(data) {
         vm.screens = data.all
         vm.primaryScreen = data.primary

@@ -4,6 +4,7 @@
   "description": "A cross-platform test card generator for AV professionals",
   "author": "Alteka Solutions <info@alteka.solutions>",
   "scripts": {
+    "test:outputs": "node --test tests/multi-output.cjs",
     "serve": "vue-cli-service serve",
     "build": "vue-cli-service build",
     "lint": "vue-cli-service lint",
