@@ -85,14 +85,15 @@ app.on('activate', () => {
 })
 
 app.on('ready', async () => {
-  if (isDevelopment && !process.env.IS_TEST) {
+  // Optional developer tools must not delay the application window.
+  createWindow()
+  if (isDevelopment && !process.env.IS_TEST && process.env.OPEN_DEVTOOLS === '1') {
     try {
       await installExtension(VUEJS3_DEVTOOLS)
     } catch (e) {
       log.error('Vue Devtools failed to install:', e.toString())
     }
   }
-  createWindow()
 })
 
 if (isDevelopment) {
@@ -287,7 +288,7 @@ async function createWindow() {
 
   if (process.env.WEBPACK_DEV_SERVER_URL) {
     await controlWindow.loadURL(process.env.WEBPACK_DEV_SERVER_URL)
-    if (!process.env.IS_TEST) controlWindow.webContents.openDevTools()
+    if (!process.env.IS_TEST && process.env.OPEN_DEVTOOLS === '1') controlWindow.webContents.openDevTools()
   } else {
     createProtocol('app')
     controlWindow.loadURL('app://./index.html')

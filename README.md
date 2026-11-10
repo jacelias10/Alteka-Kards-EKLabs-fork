@@ -37,6 +37,8 @@ cd Alteka-Kards-EKLabs-fork
 npm install --legacy-peer-deps
 ```
 
+Yarn is included as a local development dependency because Vue CLI detects the repository’s `yarn.lock` during startup. A global Yarn installation is not required.
+
 Create the local environment file before starting or building the app. The example leaves optional Rollbar reporting unconfigured.
 
 macOS / Linux:
@@ -51,7 +53,7 @@ Windows PowerShell:
 Copy-Item env.json.example env.json
 ```
 
-The project uses an older Webpack toolchain. Before running the development or build commands with Node.js 22, enable its OpenSSL compatibility option:
+The project uses an older Webpack toolchain. Before running build commands with Node.js 22, enable its OpenSSL compatibility option:
 
 ```sh
 # macOS / Linux
@@ -63,11 +65,13 @@ export NODE_OPTIONS=--openssl-legacy-provider
 $env:NODE_OPTIONS = '--openssl-legacy-provider'
 ```
 
-Start the Electron app with hot reload:
+Start the Electron app with hot reload (the launcher handles Webpack compatibility and keeps that option out of Electron’s environment):
 
 ```sh
 npm run electron:serve
 ```
+
+The control window opens without developer tools. Set `OPEN_DEVTOOLS=1` before launching if you need them.
 
 Build the desktop application:
 
